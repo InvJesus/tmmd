@@ -985,10 +985,31 @@
             
             console.log(`Aplicando ${numErrorRecords} errores...`);
             
-            errorIndices.forEach(index => {
+            // Reiniciar sistema de seguimiento para cada generación
+            appliedErrors = {
+                duplicateIds: new Set(),
+                modifiedFields: new Set()
+            };
+            
+            let successfulErrors = 0;
+            let attempts = 0;
+            const maxAttempts = numErrorRecords * 3; // Permitir más intentos
+            
+            while (successfulErrors < numErrorRecords && attempts < maxAttempts) {
+                const index = errorIndices[successfulErrors % errorIndices.length];
                 const errorType = faker.random.arrayElement(Object.values(ERROR_TYPES));
-                applyError(data, index, errorType);
-            });
+                
+                const success = applyError(data, index, errorType);
+                if (success) {
+                    successfulErrors++;
+                } else {
+                    // Si no se pudo aplicar el error, intentar con otro tipo
+                    console.log(`Reintentando con diferente tipo de error para registro ${index + 1}`);
+                }
+                attempts++;
+            }
+            
+            console.log(`Errores aplicados exitosamente: ${successfulErrors} de ${numErrorRecords} solicitados`);
             
             console.log(`Errores aplicados: ${originalErrors.length}`);
             
@@ -1125,17 +1146,24 @@
             // Generar filas (mostrar solo primeras 100 para rendimiento)
             const displayData = data.slice(0, 100);
             tableBody.innerHTML = displayData.map((row, displayIndex) => {
-                // Buscar errores para este registro específico
+                // Buscar errores para este registro específico (displayIndex corresponde al índice real)
                 const recordErrors = originalErrors.filter(error => error.index === displayIndex);
+                
                 return `
                     <tr>
                         <td class="table-cell row-number">${displayIndex + 1}</td>
                         ${headers.map(header => {
-                            const hasError = recordErrors.some(error => error.field === header);
+                            // Verificar si este campo específico tiene error en este registro
+                            const fieldError = recordErrors.find(error => error.field === header);
+                            const hasError = fieldError !== undefined;
                             const cellClass = hasError ? 'table-cell error-cell' : 'table-cell';
                             const indicator = hasError ? '<div class="error-indicator"></div>' : '';
                             const cellValue = row[header] === null || row[header] === undefined ? '' : row[header];
-                            return `<td class="${cellClass}" style="position: relative;">${cellValue}${indicator}</td>`;
+                            
+                            // Agregar título con descripción del error si existe
+                            const errorTitle = hasError ? `title="${fieldError.description}"` : '';
+                            
+                            return `<td class="${cellClass}" style="position: relative;" ${errorTitle}>${cellValue}${indicator}</td>`;
                         }).join('')}
                     </tr>
                 `;
@@ -1530,176 +1558,346 @@
             }
         }
         
+        // Sistema de seguimiento de errores aplicados para evitar duplicados
+        let appliedErrors = {
+            duplicateIds: new Set(),
+            modifiedFields: new Set()
+        };
+        
         function applyError(data, index, errorType) {
             const record = data[index];
             const errorInfo = { index: index, type: errorType, field: '', description: '', solutionHint: '' };
             
-            console.log(`Aplicando error ${errorType} en registro ${index}`);
+            console.log(`Aplicando error ${errorType} en registro ${index + 1}`);
             
             switch (errorType) {
                 case ERROR_TYPES.MISSING:
-                    const missingField = faker.random.arrayElement(['email', 'phone', 'customer_name', 'city', 'rfc', 'curp']);
+                    const availableFields = ['email', 'phone', 'customer_name', 'city', 'rfc', 'curp'];
+                    // Evitar modificar campos ya modificados en este registro
+                    const unmodifiedFields = availableFields.filter(field => 
+                        !appliedErrors.modifiedFields.has(`${index}_${field}`)
+                    );
+                    
+                    if (unmodifiedFields.length === 0) {
+                        console.log(`No hay campos disponibles para missing en registro ${index + 1}`);
+                        return false; // No se pudo aplicar el error
+                    }
+                    
+                    const missingField = faker.random.arrayElement(unmodifiedFields);
+                    appliedErrors.modifiedFields.add(`${index}_${missingField}`);
+                    
                     // Guardar valor original para referencia
                     record[`${missingField}_original`] = record[missingField];
                     record[missingField] = faker.random.boolean() ? null : '';
                     errorInfo.field = missingField;
-                    errorInfo.description = `Valor faltante en campo ${missingField}`;
-                    errorInfo.solutionHint = `Valor original disponible en ${missingField}_original`;
+                    errorInfo.description = `Valor faltante en campo "${missingField}" (registro ${index + 1})`;
+                    errorInfo.solutionHint = `Valor original disponible en campo ${missingField}_original`;
                     break;
                     
                 case ERROR_TYPES.INVALID_FORMAT:
                     const formatErrors = [
-                        () => {
-                            record.email_original = record.email;
-                            record.email = record.email.replace('@', '');
-                            errorInfo.field = 'email';
-                            errorInfo.description = 'Email con formato inválido (sin @)';
-                            errorInfo.solutionHint = 'Email original en email_original, agregar @ antes del dominio';
+                        {
+                            field: 'email',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_email`) && record.email && record.email.includes('@'),
+                            apply: () => {
+                                record.email_original = record.email;
+                                record.email = record.email.replace('@', '');
+                                errorInfo.field = 'email';
+                                errorInfo.description = `Email con formato inválido (sin @) en registro ${index + 1}`;
+                                errorInfo.solutionHint = 'Email original en email_original, agregar @ antes del dominio';
+                                appliedErrors.modifiedFields.add(`${index}_email`);
+                            }
                         },
-                        () => {
-                            record.phone_original = record.phone;
-                            record.phone = record.phone.replace('+52 ', '').substring(0, 8);
-                            errorInfo.field = 'phone';
-                            errorInfo.description = 'Teléfono mexicano sin código de país o incompleto';
-                            errorInfo.solutionHint = 'Teléfono completo con +52 en phone_original';
+                        {
+                            field: 'phone',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_phone`) && record.phone && record.phone.includes('+52'),
+                            apply: () => {
+                                record.phone_original = record.phone;
+                                record.phone = record.phone.replace('+52 ', '').substring(0, 8);
+                                errorInfo.field = 'phone';
+                                errorInfo.description = `Teléfono mexicano sin código de país o incompleto en registro ${index + 1}`;
+                                errorInfo.solutionHint = 'Teléfono completo con +52 en phone_original';
+                                appliedErrors.modifiedFields.add(`${index}_phone`);
+                            }
                         },
-                        () => {
-                            record.birth_date_original = record.birth_date;
-                            record.birth_date = record.birth_date.replace(/-/g, '/').split('/').reverse().join('/');
-                            errorInfo.field = 'birth_date';
-                            errorInfo.description = 'Fecha con formato DD/MM/YYYY en lugar de YYYY-MM-DD';
-                            errorInfo.solutionHint = 'Fecha correcta en birth_date_original';
+                        {
+                            field: 'birth_date',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_birth_date`) && record.birth_date && record.birth_date.includes('-'),
+                            apply: () => {
+                                record.birth_date_original = record.birth_date;
+                                record.birth_date = record.birth_date.replace(/-/g, '/').split('/').reverse().join('/');
+                                errorInfo.field = 'birth_date';
+                                errorInfo.description = `Fecha con formato DD/MM/YYYY en lugar de YYYY-MM-DD en registro ${index + 1}`;
+                                errorInfo.solutionHint = 'Fecha correcta en birth_date_original';
+                                appliedErrors.modifiedFields.add(`${index}_birth_date`);
+                            }
                         },
-                        () => {
-                            record.postal_code_original = record.postal_code;
-                            record.postal_code = 'CP' + record.postal_code;
-                            errorInfo.field = 'postal_code';
-                            errorInfo.description = 'Código postal con prefijo no numérico';
-                            errorInfo.solutionHint = 'Código numérico en postal_code_original';
+                        {
+                            field: 'postal_code',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_postal_code`) && record.postal_code && /^\d+$/.test(record.postal_code),
+                            apply: () => {
+                                record.postal_code_original = record.postal_code;
+                                record.postal_code = 'CP' + record.postal_code;
+                                errorInfo.field = 'postal_code';
+                                errorInfo.description = `Código postal con prefijo no numérico en registro ${index + 1}`;
+                                errorInfo.solutionHint = 'Código numérico en postal_code_original';
+                                appliedErrors.modifiedFields.add(`${index}_postal_code`);
+                            }
                         },
-                        () => {
-                            record.rfc_original = record.rfc;
-                            record.rfc = record.rfc.substring(0, 8); // RFC incompleto
-                            errorInfo.field = 'rfc';
-                            errorInfo.description = 'RFC mexicano incompleto (debe tener 13 caracteres)';
-                            errorInfo.solutionHint = 'RFC completo en rfc_original';
+                        {
+                            field: 'rfc',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_rfc`) && record.rfc && record.rfc.length === 13,
+                            apply: () => {
+                                record.rfc_original = record.rfc;
+                                record.rfc = record.rfc.substring(0, 8); // RFC incompleto
+                                errorInfo.field = 'rfc';
+                                errorInfo.description = `RFC mexicano incompleto (debe tener 13 caracteres) en registro ${index + 1}`;
+                                errorInfo.solutionHint = 'RFC completo en rfc_original';
+                                appliedErrors.modifiedFields.add(`${index}_rfc`);
+                            }
                         },
-                        () => {
-                            record.curp_original = record.curp;
-                            record.curp = record.curp.toLowerCase(); // CURP en minúsculas
-                            errorInfo.field = 'curp';
-                            errorInfo.description = 'CURP en minúsculas (debe estar en mayúsculas)';
-                            errorInfo.solutionHint = 'CURP correcto en curp_original';
+                        {
+                            field: 'curp',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_curp`) && record.curp && record.curp === record.curp.toUpperCase(),
+                            apply: () => {
+                                record.curp_original = record.curp;
+                                record.curp = record.curp.toLowerCase(); // CURP en minúsculas
+                                errorInfo.field = 'curp';
+                                errorInfo.description = `CURP en minúsculas (debe estar en mayúsculas) en registro ${index + 1}`;
+                                errorInfo.solutionHint = 'CURP correcto en curp_original';
+                                appliedErrors.modifiedFields.add(`${index}_curp`);
+                            }
                         }
                     ];
-                    const formatError = faker.random.arrayElement(formatErrors);
-                    formatError();
+                    
+                    // Filtrar errores aplicables
+                    const applicableFormatErrors = formatErrors.filter(error => error.condition());
+                    
+                    if (applicableFormatErrors.length === 0) {
+                        console.log(`No hay errores de formato aplicables en registro ${index + 1}`);
+                        return false;
+                    }
+                    
+                    const selectedFormatError = faker.random.arrayElement(applicableFormatErrors);
+                    selectedFormatError.apply();
                     break;
                     
                 case ERROR_TYPES.OUT_OF_RANGE:
                     const rangeErrors = [
-                        () => {
-                            record.age_calculated = new Date().getFullYear() - new Date(record.birth_date).getFullYear();
-                            record.age = faker.random.number({ min: 150, max: 200 });
-                            errorInfo.field = 'age';
-                            errorInfo.description = 'Edad fuera de rango lógico (>150 años)';
-                            errorInfo.solutionHint = `Edad correcta calculable desde birth_date: ${record.age_calculated} años`;
+                        {
+                            field: 'age',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_age`) && record.age && record.birth_date,
+                            apply: () => {
+                                record.age_calculated = new Date().getFullYear() - new Date(record.birth_date).getFullYear();
+                                record.age_original = record.age;
+                                record.age = faker.random.number({ min: 150, max: 200 });
+                                errorInfo.field = 'age';
+                                errorInfo.description = `Edad fuera de rango lógico (${record.age} años) en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Edad correcta calculable desde birth_date: ${record.age_calculated} años`;
+                                appliedErrors.modifiedFields.add(`${index}_age`);
+                            }
                         },
-                        () => {
-                            record.salary_original = record.salary;
-                            record.salary = record.salary * 100; // Error de unidad (centavos)
-                            errorInfo.field = 'salary';
-                            errorInfo.description = 'Salario en centavos en lugar de pesos mexicanos';
-                            errorInfo.solutionHint = `Salario correcto en pesos: ${record.salary_original}`;
+                        {
+                            field: 'salary',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_salary`) && record.salary && record.salary < 100000,
+                            apply: () => {
+                                record.salary_original = record.salary;
+                                record.salary = record.salary * 100; // Error de unidad (centavos)
+                                errorInfo.field = 'salary';
+                                errorInfo.description = `Salario fuera de rango (${record.salary} - posible error de unidad) en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Salario correcto en pesos: ${record.salary_original}`;
+                                appliedErrors.modifiedFields.add(`${index}_salary`);
+                            }
                         },
-                        () => {
-                            record.product_price_original = record.product_price;
-                            record.product_price = record.product_price * 100;
-                            errorInfo.field = 'product_price';
-                            errorInfo.description = 'Precio fuera de rango (posible error de unidad)';
-                            errorInfo.solutionHint = `Precio correcto en product_price_original: ${record.product_price_original}`;
+                        {
+                            field: 'product_price',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_product_price`) && record.product_price && record.product_price < 1000,
+                            apply: () => {
+                                record.product_price_original = record.product_price;
+                                record.product_price = record.product_price * 100;
+                                errorInfo.field = 'product_price';
+                                errorInfo.description = `Precio fuera de rango (${record.product_price} - posible error de unidad) en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Precio correcto en product_price_original: ${record.product_price_original}`;
+                                appliedErrors.modifiedFields.add(`${index}_product_price`);
+                            }
                         },
-                        () => {
-                            record.birth_date_calculated = new Date(new Date().getFullYear() - record.age, 0, 1).toISOString().split('T')[0];
-                            record.birth_date = '1800-01-01';
-                            errorInfo.field = 'birth_date';
-                            errorInfo.description = 'Fecha de nacimiento demasiado antigua';
-                            errorInfo.solutionHint = `Fecha calculable desde edad: ${record.birth_date_calculated}`;
+                        {
+                            field: 'birth_date',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_birth_date`) && record.birth_date && record.age,
+                            apply: () => {
+                                record.birth_date_calculated = new Date(new Date().getFullYear() - record.age, 0, 1).toISOString().split('T')[0];
+                                record.birth_date_original = record.birth_date;
+                                record.birth_date = '1800-01-01';
+                                errorInfo.field = 'birth_date';
+                                errorInfo.description = `Fecha de nacimiento demasiado antigua (1800-01-01) en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Fecha calculable desde edad: ${record.birth_date_calculated}`;
+                                appliedErrors.modifiedFields.add(`${index}_birth_date`);
+                            }
                         }
                     ];
-                    const rangeError = faker.random.arrayElement(rangeErrors);
-                    rangeError();
+                    
+                    const applicableRangeErrors = rangeErrors.filter(error => error.condition());
+                    
+                    if (applicableRangeErrors.length === 0) {
+                        console.log(`No hay errores de rango aplicables en registro ${index + 1}`);
+                        return false;
+                    }
+                    
+                    const selectedRangeError = faker.random.arrayElement(applicableRangeErrors);
+                    selectedRangeError.apply();
                     break;
                     
                 case ERROR_TYPES.DUPLICATE:
-                    record.id_original = record.id;
-                    if (index > 0) {
-                        record.id = data[index - 1].id;
-                        errorInfo.description = `ID duplicado (${record.id})`;
-                    } else {
-                        record.id = 999999;
-                        errorInfo.description = 'ID duplicado (999999)';
+                    // Verificar que no hayamos ya aplicado duplicados a este registro
+                    if (appliedErrors.modifiedFields.has(`${index}_id`)) {
+                        console.log(`ID ya modificado en registro ${index + 1}`);
+                        return false;
                     }
+                    
+                    record.id_original = record.id;
+                    
+                    // Buscar un ID existente para duplicar, evitando IDs ya duplicados
+                    let targetId = null;
+                    const maxAttempts = 10;
+                    let attempts = 0;
+                    
+                    while (attempts < maxAttempts && !targetId) {
+                        const randomIndex = faker.random.number({ min: 0, max: data.length - 1 });
+                        const candidateId = data[randomIndex].id_original || data[randomIndex].id;
+                        
+                        // Verificar que no sea el mismo registro y que el ID no esté ya duplicado
+                        if (randomIndex !== index && !appliedErrors.duplicateIds.has(candidateId)) {
+                            targetId = candidateId;
+                        }
+                        attempts++;
+                    }
+                    
+                    if (!targetId) {
+                        // Si no encontramos un ID válido, usar un ID fijo conocido
+                        targetId = 999999;
+                    }
+                    
+                    record.id = targetId;
+                    appliedErrors.duplicateIds.add(targetId);
+                    appliedErrors.modifiedFields.add(`${index}_id`);
+                    
                     errorInfo.field = 'id';
+                    errorInfo.description = `ID duplicado (${targetId}) en registro ${index + 1}`;
                     errorInfo.solutionHint = `ID original único en id_original: ${record.id_original}`;
                     break;
                     
                 case ERROR_TYPES.CALCULATION_ERROR:
+                    if (appliedErrors.modifiedFields.has(`${index}_product_total`) || 
+                        !record.product_price || !record.product_quantity) {
+                        console.log(`No se puede aplicar error de cálculo en registro ${index + 1}`);
+                        return false;
+                    }
+                    
                     const correctTotal = record.product_price * record.product_quantity;
                     record.product_total_correct = correctTotal;
-                    const errorFactor = faker.random.arrayElement([0.5, 1.5, 2, 0.1]);
-                    record.product_total = Math.round(correctTotal * errorFactor);
+                    const errorFactor = faker.random.arrayElement([0.5, 1.5, 2, 0.1, 10]);
+                    const incorrectTotal = Math.round(correctTotal * errorFactor);
+                    
+                    // Asegurar que el total incorrecto sea diferente al correcto
+                    if (incorrectTotal === correctTotal) {
+                        record.product_total = correctTotal + faker.random.number({ min: 10, max: 100 });
+                    } else {
+                        record.product_total = incorrectTotal;
+                    }
+                    
+                    appliedErrors.modifiedFields.add(`${index}_product_total`);
                     errorInfo.field = 'product_total';
-                    errorInfo.description = `Error de cálculo: total debería ser ${correctTotal} pero es ${record.product_total}`;
+                    errorInfo.description = `Error de cálculo: total debería ser ${correctTotal} pero es ${record.product_total} en registro ${index + 1}`;
                     errorInfo.solutionHint = `Total correcto en product_total_correct: ${correctTotal}`;
                     break;
                     
                 case ERROR_TYPES.UNIT_MISMATCH:
+                    if (appliedErrors.modifiedFields.has(`${index}_product_price`) || 
+                        !record.product_price || record.product_price >= 1000) {
+                        console.log(`No se puede aplicar error de unidad en registro ${index + 1}`);
+                        return false;
+                    }
+                    
                     record.product_price_original = record.product_price;
                     record.product_price = Math.round(record.product_price * 100);
+                    appliedErrors.modifiedFields.add(`${index}_product_price`);
+                    
                     errorInfo.field = 'product_price';
-                    errorInfo.description = 'Posible error de unidad/moneda (precio en centavos)';
+                    errorInfo.description = `Error de unidad/moneda: precio en centavos (${record.product_price}) en lugar de pesos en registro ${index + 1}`;
                     errorInfo.solutionHint = `Precio en unidad correcta en product_price_original: ${record.product_price_original}`;
                     break;
                     
                 case ERROR_TYPES.FALSE_REFERENTIAL_INTEGRITY:
                     const integrityErrors = [
-                        () => {
-                            record.state_original = record.state;
-                            record.state = record.city;
-                            errorInfo.field = 'state';
-                            errorInfo.description = 'Integridad lógica falsa: ciudad en campo estado';
-                            errorInfo.solutionHint = `Estado correcto en state_original: ${record.state_original}`;
+                        {
+                            field: 'state',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_state`) && record.state && record.city,
+                            apply: () => {
+                                record.state_original = record.state;
+                                record.state = record.city;
+                                errorInfo.field = 'state';
+                                errorInfo.description = `Integridad lógica falsa: ciudad "${record.city}" en campo estado en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Estado correcto en state_original: ${record.state_original}`;
+                                appliedErrors.modifiedFields.add(`${index}_state`);
+                            }
                         },
-                        () => {
-                            record.department_original = record.department;
-                            record.department = record.city;
-                            errorInfo.field = 'department';
-                            errorInfo.description = 'Integridad lógica falsa: ciudad en campo departamento';
-                            errorInfo.solutionHint = `Departamento correcto en department_original: ${record.department_original}`;
+                        {
+                            field: 'department',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_department`) && record.department && record.city,
+                            apply: () => {
+                                record.department_original = record.department;
+                                record.department = record.city;
+                                errorInfo.field = 'department';
+                                errorInfo.description = `Integridad lógica falsa: ciudad "${record.city}" en campo departamento en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Departamento correcto en department_original: ${record.department_original}`;
+                                appliedErrors.modifiedFields.add(`${index}_department`);
+                            }
                         },
-                        () => {
-                            record.city_original = record.city;
-                            record.city = record.department;
-                            errorInfo.field = 'city';
-                            errorInfo.description = 'Integridad lógica falsa: departamento en campo ciudad';
-                            errorInfo.solutionHint = `Ciudad correcta en city_original: ${record.city_original}`;
+                        {
+                            field: 'city',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_city`) && record.city && record.department,
+                            apply: () => {
+                                record.city_original = record.city;
+                                record.city = record.department;
+                                errorInfo.field = 'city';
+                                errorInfo.description = `Integridad lógica falsa: departamento "${record.department}" en campo ciudad en registro ${index + 1}`;
+                                errorInfo.solutionHint = `Ciudad correcta en city_original: ${record.city_original}`;
+                                appliedErrors.modifiedFields.add(`${index}_city`);
+                            }
                         },
-                        () => {
-                            record.country_original = record.country;
-                            record.country = record.state;
-                            errorInfo.field = 'country';
-                            errorInfo.description = 'Integridad lógica falsa: estado en campo país';
-                            errorInfo.solutionHint = `País correcto en country_original: ${record.country_original}`;
+                        {
+                            field: 'country',
+                            condition: () => !appliedErrors.modifiedFields.has(`${index}_country`) && record.country && record.state,
+                            apply: () => {
+                                record.country_original = record.country;
+                                record.country = record.state;
+                                errorInfo.field = 'country';
+                                errorInfo.description = `Integridad lógica falsa: estado "${record.state}" en campo país en registro ${index + 1}`;
+                                errorInfo.solutionHint = `País correcto en country_original: ${record.country_original}`;
+                                appliedErrors.modifiedFields.add(`${index}_country`);
+                            }
                         }
                     ];
-                    const integrityError = faker.random.arrayElement(integrityErrors);
-                    integrityError();
+                    
+                    const applicableIntegrityErrors = integrityErrors.filter(error => error.condition());
+                    
+                    if (applicableIntegrityErrors.length === 0) {
+                        console.log(`No hay errores de integridad aplicables en registro ${index + 1}`);
+                        return false;
+                    }
+                    
+                    const selectedIntegrityError = faker.random.arrayElement(applicableIntegrityErrors);
+                    selectedIntegrityError.apply();
                     break;
+                    
+                default:
+                    console.log(`Tipo de error no reconocido: ${errorType}`);
+                    return false;
             }
             
             originalErrors.push(errorInfo);
-            console.log(`Error aplicado: ${errorInfo.description}`);
+            console.log(`✅ Error aplicado exitosamente: ${errorInfo.description}`);
+            return true;
         }
         
 
@@ -3895,5 +4093,5 @@
             `;
         }
     </script>
-<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'992bd53ed140649a',t:'MTc2MTE2NTg3MC4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+<script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'992c3f3f715e649a',t:'MTc2MTE3MDIxMS4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
 </html>
